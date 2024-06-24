@@ -1,0 +1,292 @@
+from curses.ascii import isupper
+from lib2to3.pgen2 import token
+from msilib.schema import Error
+import requests
+import datetime
+import pytz
+import time
+import json
+from html.parser import HTMLParser
+from bs4 import BeautifulSoup
+import extra_lists
+from tqdm import tqdm
+import pygsheets
+
+class Game:
+    def __init__(self, title, score, review_count, true_review_count, main_page_review_count, year, url):    
+        self.title = title
+        self.score = score
+        self.review_count = review_count
+        self.true_review_count = true_review_count
+        self.main_page_review_count = main_page_review_count
+        self.year = year
+        self.url = url
+
+def insert_into_true_list(game, true_list):
+    if true_list == []:
+        true_list.append(game)
+    else:
+        i = len(true_list) - 1
+        while game.score >= true_list[i].score:
+            i -= 1
+            if i == 0:
+                break
+        true_list.insert(i + 1, game)
+
+hof_list = []
+runtime_datestring = f'As of {datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%B %d, %Y at %#I:%M %p")}'
+start_time = time.time()
+
+page_count = 20
+
+scrape_url = ""
+print("Filtering games...")
+for i in range(1, page_count):
+    if i == 1:
+        scrape_url = "https://opencritic.com/browse/all"
+    elif i > 1:
+        scrape_url = f"https://opencritic.com/browse/all?page={i}"
+
+    r = requests.get(scrape_url)
+    soup = BeautifulSoup(r.content, "html.parser")
+
+    chunk = soup.select_one('.desktop-game-display div')
+    rows = chunk.select('.row')
+    for row in rows:
+        title = row.select_one("a").text.strip()
+        if title in extra_lists.remove_list:
+            continue
+        hof_list.append(Game(
+            title = title,
+            score = row.select_one(".score").text.strip(),
+            review_count = 0,
+            true_review_count = 0,
+            main_page_review_count = 0,
+            year = int(row.select_one(".first-release-date").select_one("span").text.strip()[-4:]),
+            url = row.select_one("a")['href']
+        ))
+
+with open("opencritic_hall_of_fame.json", "r") as f:
+    data = f.read()
+file_in_dict = json.loads(data)
+file_out_dict = {}
+game_list_x_dict = []
+
+client = pygsheets.authorize(service_account_file="opencritic-hall-of-fame-75785a168121.json")
+sheet = client.open("opencritic_hall_of_fame")
+true_list_gen8 = []
+true_list_gen9 = []
+
+for game_index in tqdm(range(0, len(hof_list)), desc="Aggregating reviews from opencritic.com and assembling Hall of Fame list..."):
+    game = hof_list[game_index]
+    review_list = []
+    score_sum = 0
+    score_count = 0
+    current_page = 0
+    last_page = False
+
+    # Get total number of reviews from game's main page (used for error-checking)
+    error_check_req = requests.get(f"https://opencritic.com/{game.url}/")
+    soup = BeautifulSoup(error_check_req.content, "html.parser")
+    main_page_summary = soup.select('app-rapid-review-list .text-right')
+    game.main_page_review_count = int(main_page_summary[0].text.split()[2])
+    
+    while not last_page:
+        current_page += 1
+        if current_page == 1:
+            scrape_url = f"https://opencritic.com/{game.url}/reviews"
+            first_page = True
+        elif current_page > 1:
+            scrape_url = f"https://opencritic.com/{game.url}/reviews?page={current_page}"
+            first_page = False
+
+        r = requests.get(scrape_url)
+        soup = BeautifulSoup(r.content, "html.parser")
+
+        review_rows = soup.select('app-review-table app-review-row')
+        for review in review_rows:
+            r_obj = review.select_one('.score-number-bold')
+            if r_obj is None:
+                # STAR SCORES
+                star_list = review.select_one('app-score-display-raw').select('span .fas')
+                empty_star_list = review.select_one('app-score-display-raw').select('span .far')
+                if len(star_list) == 0:
+                    # POSSIBLE LOST SCORES HERE
+                    game.true_review_count += 1
+                    continue
+                else:
+                    star_score, star_count = 0, 0
+                    for star in star_list:
+                        star_count += 1
+                        if 'fa-star' in star['class']:
+                            star_score += 1
+                        elif 'fa-star-half-alt' in star['class']:
+                            star_score += .5
+                        else:
+                            raise Error
+                    star_count += len(empty_star_list)
+                    review_score = star_score * (100 / star_count)
+                    game.true_review_count += 1
+            else:
+                # NUMERIC SCORES (AND UNSCORED!!!)
+                contains_char = False
+                for char in r_obj.text:
+                    if char.isupper() or char.islower():
+                        contains_char = True
+                if contains_char:
+                    game.true_review_count += 1
+                    continue
+                else:
+                    if '%' in r_obj.text:
+                        # STANDARD NUMERIC SCORE
+                        review_score = float(r_obj.text[:-1])
+                        game.true_review_count += 1
+                    else:
+                        # PERCENTAGE SCORE
+                        tokens = r_obj.text.split()
+                        review_score = float(tokens[0]) * (100 / float(tokens[2]))
+                        game.true_review_count += 1
+            score_sum += review_score
+            score_count += 1
+            review_list.append(review_score)
+        nav_buttons = soup.select('.btn')
+        if len(nav_buttons) != 4 and not first_page:
+            last_page = True
+    if score_count >= 20:
+        game.score = score_sum / score_count
+        game.review_count = score_count
+        if game.year >= 2021:
+            insert_into_true_list(game, true_list_gen9)
+        else:
+            insert_into_true_list(game, true_list_gen8)
+
+# Write Final Output To Google Sheets
+print("Writing to Google Sheets...")
+worksheet_gen8 = sheet.worksheet("title", "8th Generation (2013 - 2020)")
+for i in range (2, 52):
+    if worksheet_gen8.cell(f"H{i}").value == "X":
+        game_list_x_dict.append(worksheet_gen8.cell(f"B{i}").value)
+worksheet_gen8.clear()
+worksheet_gen8.cell("A1").set_text_format("bold", True).value = "Rank"
+worksheet_gen8.cell("B1").set_text_format("bold", True).value = "Title"
+worksheet_gen8.cell("C1").set_text_format("bold", True).value = "Score"
+worksheet_gen8.cell("D1").set_text_format("bold", True).value = "Change"
+worksheet_gen8.cell("E1").set_text_format("bold", True).value = "Reviews"
+worksheet_gen8.cell("F1").set_text_format("bold", True).value = "Errors?"
+worksheet_gen8.cell("G1").set_text_format("bold", True).value = "Year"
+worksheet_gen8.cell("H1").set_text_format("bold", True).value = 'Completed (Add "X")'
+rank_counter_gen8 = 1
+for game in true_list_gen8:
+    if game.title in extra_lists.corrections_dict.keys():
+        game.year = extra_lists.corrections_dict[game.title][1]
+        game.title = extra_lists.corrections_dict[game.title][0]
+    if game.title not in file_in_dict.keys():
+        change_text = "New"
+    else:
+        if float(file_in_dict[game.title]) - float(game.score) == 0:
+            change_text = "0"
+        elif float(file_in_dict[game.title]) - float(game.score) < 0:
+            change_text = f"+{float(file_in_dict[game.title]) - float(game.score)}"
+        else:
+            change_text = f"-{float(file_in_dict[game.title]) - float(game.score)}"
+    worksheet_gen8.update_row(rank_counter_gen8 + 1,[[
+        rank_counter_gen8,
+        game.title,
+        game.score,
+        change_text,
+        game.review_count,
+        f"{game.true_review_count}/{game.main_page_review_count}" if game.true_review_count != game.main_page_review_count else "No",
+        game.year,
+        "X" if game.title in game_list_x_dict else ""]])
+    worksheet_gen8.add_conditional_formatting(f"B{rank_counter_gen8 + 1}", f"B{rank_counter_gen8 + 1}", "CUSTOM_FORMULA", {"text_format" : {"bold" : True, "italic" : True}}, condition_values=[f'=H{rank_counter_gen8 + 1}=""'])
+    file_out_dict[game.title] = game.score
+    rank_counter_gen8 += 1
+    if rank_counter_gen8 > 50:
+        cutoff_score = game.score
+        break
+# Individual Year Progress
+worksheet_gen8.cell(f"E{rank_counter_gen8 + 3}").formula = f'=CONCATENATE("2013: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2013", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2013"))'
+worksheet_gen8.cell(f"F{rank_counter_gen8 + 3}").formula = f'=CONCATENATE("2014: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2014", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2014"))'
+worksheet_gen8.cell(f"G{rank_counter_gen8 + 3}").formula = f'=CONCATENATE("2015: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2015", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2015"))'
+worksheet_gen8.cell(f"H{rank_counter_gen8 + 3}").formula = f'=CONCATENATE("2016: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2016", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2016"))'
+worksheet_gen8.cell(f"E{rank_counter_gen8 + 4}").formula = f'=CONCATENATE("2017: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2017", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2017"))'
+worksheet_gen8.cell(f"F{rank_counter_gen8 + 4}").formula = f'=CONCATENATE("2018: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2018", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2018"))'
+worksheet_gen8.cell(f"G{rank_counter_gen8 + 4}").formula = f'=CONCATENATE("2019: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2019", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2019"))'
+worksheet_gen8.cell(f"H{rank_counter_gen8 + 4}").formula = f'=CONCATENATE("2020: ", COUNTIFS(G2:G{rank_counter_gen8 + 1}, "=2020", H2:H{rank_counter_gen8 + 1}, "=X"), "/", COUNTIF(G2:G{rank_counter_gen8 + 1}, "=2020"))'
+worksheet_gen8.cell(f"H{rank_counter_gen8 + 1}").formula = f'=CONCATENATE("Progess: ", COUNTIF(H2:H{rank_counter_gen8}, "=X"), "/{rank_counter_gen8 - 1}")'
+worksheet_gen8.cell(f"B{rank_counter_gen8 + 3}").value = runtime_datestring
+
+# 9th Generation Begins Below
+worksheet_gen9 = sheet.worksheet("title", "9th Generation (2021 - Present)")
+for i in range (2, 52):
+    if worksheet_gen9.cell(f"H{i}").value == "X":
+        game_list_x_dict.append(worksheet_gen9.cell(f"B{i}").value)
+worksheet_gen9.clear()
+worksheet_gen9.cell("A1").set_text_format("bold", True).value = "Rank"
+worksheet_gen9.cell("B1").set_text_format("bold", True).value = "Title"
+worksheet_gen9.cell("C1").set_text_format("bold", True).value = "Score"
+worksheet_gen9.cell("D1").set_text_format("bold", True).value = "Change"
+worksheet_gen9.cell("E1").set_text_format("bold", True).value = "Reviews"
+worksheet_gen9.cell("F1").set_text_format("bold", True).value = "Errors?"
+worksheet_gen9.cell("G1").set_text_format("bold", True).value = "Year"
+worksheet_gen9.cell("H1").set_text_format("bold", True).value = 'Completed (Add "X")'
+rank_counter_gen9 = 1
+cutoff_passed = False
+cutoff_offset = 0
+cutoff_point = 0
+for game in true_list_gen9:
+    if game.title in extra_lists.corrections_dict.keys():
+        game.year = extra_lists.corrections_dict[game.title][1]
+        game.title = extra_lists.corrections_dict[game.title][0]
+    if game.score < cutoff_score and cutoff_passed is False:
+        cutoff_passed = True
+        cutoff_offset = 1
+        cutoff_point = rank_counter_gen9
+    if game.title not in file_in_dict.keys():
+        change_text = "New"
+    else:
+        if float(file_in_dict[game.title]) - float(game.score) == 0:
+            change_text = "0"
+        elif float(file_in_dict[game.title]) - float(game.score) < 0:
+            change_text = f"+{float(file_in_dict[game.title]) - float(game.score)}"
+        else:
+            change_text = f"-{float(file_in_dict[game.title]) - float(game.score)}"
+    worksheet_gen9.update_row(rank_counter_gen9 + 1 + cutoff_offset, [[
+        rank_counter_gen9,
+        game.title,
+        game.score,
+        "New" if game.title not in file_in_dict.keys() else (change_text), 
+        game.review_count,
+        f"{game.true_review_count}/{game.main_page_review_count}" if game.true_review_count != game.main_page_review_count else "No",
+        game.year,
+        "X" if game.title in game_list_x_dict else ""]])
+    worksheet_gen9.add_conditional_formatting(f"B{rank_counter_gen9 + 1 + cutoff_offset}", f"B{rank_counter_gen9 + 1 + cutoff_offset}", "CUSTOM_FORMULA", {"text_format" : {"bold" : True, "italic" : True}}, condition_values=[f'=H{rank_counter_gen9 + 1 + cutoff_offset}=""'])
+    file_out_dict[game.title] = game.score
+    rank_counter_gen9 += 1
+    if rank_counter_gen9 > 50:
+        break
+if cutoff_passed is True:
+    formula_cutoff = cutoff_point
+else:
+    formula_cutoff = rank_counter_gen9
+# Individual Year Progress
+worksheet_gen9.cell(f"E{rank_counter_gen9 + 3 + cutoff_offset}").formula = f'=CONCATENATE("2021: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2021", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2021"))'
+worksheet_gen9.cell(f"F{rank_counter_gen9 + 3 + cutoff_offset}").formula = f'=CONCATENATE("2022: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2022", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2022"))'
+worksheet_gen9.cell(f"G{rank_counter_gen9 + 3 + cutoff_offset}").formula = f'=CONCATENATE("2023: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2023", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2023"))'
+worksheet_gen9.cell(f"H{rank_counter_gen9 + 3 + cutoff_offset}").formula = f'=CONCATENATE("2024: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2024", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2024"))'
+worksheet_gen9.cell(f"E{rank_counter_gen9 + 4 + cutoff_offset}").formula = f'=CONCATENATE("2025: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2025", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2025"))'
+worksheet_gen9.cell(f"F{rank_counter_gen9 + 4 + cutoff_offset}").formula = f'=CONCATENATE("2026: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2026", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2026"))'
+worksheet_gen9.cell(f"G{rank_counter_gen9 + 4 + cutoff_offset}").formula = f'=CONCATENATE("2027: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2027", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2027"))'
+worksheet_gen9.cell(f"H{rank_counter_gen9 + 4 + cutoff_offset}").formula = f'=CONCATENATE("2028: ", COUNTIFS(G2:G{formula_cutoff + 1}, "=2028", H2:H{formula_cutoff + 1}, "=X"), "/", COUNTIF(G2:G{formula_cutoff + 1}, "=2028"))'
+worksheet_gen9.cell(f"H{rank_counter_gen9 + 1 + cutoff_offset}").formula = f'=CONCATENATE("Progess: ", COUNTIF(H2:H{formula_cutoff}, "=X"), "/{formula_cutoff - 1}")'
+worksheet_gen9.cell(f"B{rank_counter_gen9 + 3 + cutoff_offset}").value = runtime_datestring
+
+print("Done!")
+
+end_time = time.time()
+minutes, seconds = divmod(datetime.timedelta(seconds=(end_time - start_time)).seconds, 60)
+worksheet_gen8.cell(f"B{rank_counter_gen8 + 4}").value = f"Completed in {minutes} minutes and {seconds} seconds"
+worksheet_gen9.cell(f"B{rank_counter_gen9 + 4 + cutoff_offset}").value = f"Completed in {minutes} minutes and {seconds} seconds"
+
+with open("opencritic_hall_of_fame.json", "w") as f:
+    json.dump(file_out_dict, f)

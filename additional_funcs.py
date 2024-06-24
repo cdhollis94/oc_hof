@@ -1,4 +1,3 @@
-from msilib.schema import Error
 from bs4 import BeautifulSoup
 import requests
 import pygsheets
@@ -44,7 +43,7 @@ def specific_game(title, game_number):
                         elif 'fa-star-half-alt' in star['class']:
                             star_score += .5
                         else:
-                            raise Error
+                            raise ConnectionError
                     star_count += len(empty_star_list)
                     review_score = star_score * (100 / star_count)
             else:

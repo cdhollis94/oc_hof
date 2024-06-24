@@ -123,7 +123,7 @@ x_list = []
 winner_names = []
 runner_up_dict = {}
 
-client = pygsheets.authorize(service_account_file="opencritic-hall-of-fame-75785a168121.json")
+client = pygsheets.authorize(service_account_file="opencritic-hall-of-fame-05b0a303f5b6.json")
 sheet = client.open("opencritic_hall_of_fame")
 true_list_gen8 = []
 true_list_gen8_titles = []

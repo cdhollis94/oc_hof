@@ -1,6 +1,5 @@
 from curses.ascii import isupper
 from lib2to3.pgen2 import token
-from msilib.schema import Error
 import requests
 import datetime
 import pytz
@@ -209,7 +208,7 @@ for game_index in tqdm(range(0, len(hof_list)), desc="Aggregating reviews from o
                         elif 'fa-star-half-alt' in star['class']:
                             star_score += .5
                         else:
-                            raise Error
+                            raise ConnectionError
                     star_count += len(empty_star_list)
                     review_score = star_score * (100 / star_count)
                     game.true_review_count += 1

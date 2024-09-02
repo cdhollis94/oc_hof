@@ -99,7 +99,7 @@ for i in range(1, page_count):
     chunk = soup.select_one('.desktop-game-display div')
     rows = chunk.select('.row')
     for row in rows:
-        title = row.select_one("a").text.strip()
+        title = row.select_one(".game-name").text.strip()
         if title in extra_lists.remove_list:
             continue
         hof_list.append(Game(

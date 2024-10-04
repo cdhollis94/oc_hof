@@ -68,6 +68,7 @@ remove_list = [
     "Elden Ring: Shadow of the Erdtree",
     "Castlevania Dominus Collection",
     "Marvel vs. Capcom Fighting Collection: Arcade Classics",
+    "Silent Hill 2",
     "Hades II"                                  # <------ Remove this once it leaves Early Access
 ]
 

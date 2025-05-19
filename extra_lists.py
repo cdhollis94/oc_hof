@@ -69,6 +69,8 @@ remove_list = [
     "Castlevania Dominus Collection",
     "Marvel vs. Capcom Fighting Collection: Arcade Classics",
     "The Talos Principle: Reawakened",
+    "Xenoblade Chronicles X: Definitive Edition",
+    "God of War Ragnarok: Valhalla",
     "Hades II"                                  # <------ Remove this once it leaves Early Access
 ]
 
